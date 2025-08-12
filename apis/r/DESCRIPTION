@@ -57,6 +57,7 @@ LinkingTo:
     Rcpp,
     RcppInt64
 Suggests:
+    anndataR,
     BPCells,
     datasets,
     iterators,
