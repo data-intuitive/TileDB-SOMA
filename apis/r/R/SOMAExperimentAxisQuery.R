@@ -1330,6 +1330,248 @@ SOMAExperimentAxisQuery <- R6::R6Class(
       # Validate and return
       methods::validObject(sce)
       return(sce)
+    },
+
+    #' Export to AnnData
+    #'
+    #' Export query results as an `AnnData` object. This method is
+    #' a convenience wrapper around `anndataR::AnnData()`.
+    #'
+    #' @param X_layers A named character vector specifying the X layers
+    #' to export. If `NULL`, exports all available layers.
+    #' @param obs_index Name of the cell-level metadata column to use as
+    #' cell names in the exported object. If `NULL`, defaults to
+    #' `paste0("obs", soma_joinid)`.
+    #' @param var_index Name of the feature-level metadata column to use as
+    #' feature names in the exported object. If `NULL`, defaults to
+    #' `paste0("var", soma_joinid)`.
+    #' @param obs_column_names Names of cell-level metadata columns to export.
+    #' If `NULL`, defaults to all columns. If `FALSE`, no metadata is exported.
+    #' @param var_column_names Names of feature-level metadata columns to export.
+    #' If `NULL`, defaults to all columns. If `FALSE`, no metadata is exported.
+    #' @param obsm_layers Names of observation matrices to export.
+    #' If `NULL`, defaults to all available matrices. If `FALSE`, none are exported.
+    #' @param varm_layers Names of variable matrices to export.
+    #' If `NULL`, defaults to all available matrices. If `FALSE`, none are exported.
+    #' @param obsp_layers Names of observation pairwise matrices to export.
+    #' If `NULL`, defaults to all available matrices. If `FALSE`, none are exported.
+    #' @param varp_layers Names of variable pairwise matrices to export.
+    #' If `NULL`, defaults to all available matrices. If `FALSE`, none are exported.
+    #' @param drop_levels Remove unused factor levels from categorical columns.
+    #' @param ... Additional arguments passed to `anndataR::AnnData()`.
+    #'
+    #' @return An `AnnData` object containing the query results.
+    #'
+    #' @export
+    to_anndata = function(
+      X_layers = NULL,
+      obs_index = NULL,
+      var_index = NULL,
+      obs_column_names = NULL,
+      var_column_names = NULL,
+      obsm_layers = NULL,
+      varm_layers = NULL,
+      obsp_layers = NULL,
+      varp_layers = NULL,
+      drop_levels = FALSE,
+      ...
+    ) {
+      check_package("anndataR")
+      stopifnot(
+        "'X_layers' must be a character vector" = is_character_or_null(X_layers),
+        "'obs_index' must be a single character value" = is.null(obs_index) ||
+          (is_scalar_character(obs_index) && !is.na(obs_index)),
+        "'var_index' must be a single character value" = is.null(var_index) ||
+          (is_scalar_character(var_index) && !is.na(var_index)),
+        "'obs_column_names' must be a character vector" = is.null(obs_column_names) ||
+          is.character(obs_column_names) ||
+          is_scalar_logical(obs_column_names),
+        "'var_column_names' must be a character vector" = is.null(var_column_names) ||
+          is.character(var_column_names) ||
+          is_scalar_logical(var_column_names),
+        "'obsm_layers' must be a character vector" = is.null(obsm_layers) ||
+          is.character(obsm_layers) ||
+          is_scalar_logical(obsm_layers),
+        "'varm_layers' must be a character vector" = is.null(varm_layers) ||
+          is.character(varm_layers) ||
+          is_scalar_logical(varm_layers),
+        "'obsp_layers' must be a character vector" = is.null(obsp_layers) ||
+          is.character(obsp_layers) ||
+          is_scalar_logical(obsp_layers),
+        "'varp_layers' must be a character vector" = is.null(varp_layers) ||
+          is.character(varp_layers) ||
+          is_scalar_logical(varp_layers),
+        "'drop_levels' must be TRUE or FALSE" = isTRUE(drop_levels) ||
+          isFALSE(drop_levels)
+      )
+      
+      # Load in colData (obs)
+      obs <- private$.load_df(
+        "obs",
+        index = obs_index,
+        column_names = obs_column_names,
+        drop_levels = drop_levels
+      )
+      
+      # Load in rowData (var)
+      var <- private$.load_df(
+        "var",
+        index = var_index,
+        column_names = var_column_names,
+        drop_levels = drop_levels
+      )
+      
+      # Check the layers
+      X_layers <- pad_names(X_layers %||% self$ms$X$names())
+      assert_subset(x = X_layers, y = self$ms$X$names(), type = "X_layer")
+      
+      # Read in the X matrix (main data matrix)
+      X <- if (length(X_layers) > 0) {
+        # Use the first layer as the main X matrix
+        layer_name <- X_layers[1]
+        mat <- Matrix::t(self$to_sparse_matrix(
+          collection = "X",
+          layer_name = layer_name
+        ))
+        dimnames(mat) <- list(row.names(obs), row.names(var))
+        mat
+      } else {
+        NULL
+      }
+      
+      # Read in the remaining layers
+      layers <- if (length(X_layers) > 1) {
+        layers_list <- lapply(
+          X = X_layers[-1],  # Skip first layer as it's used for X
+          FUN = function(layer) {
+            mat <- Matrix::t(self$to_sparse_matrix(
+              collection = "X",
+              layer_name = layer
+            ))
+            dimnames(mat) <- list(row.names(obs), row.names(var))
+            return(mat)
+          }
+        )
+        names(layers_list) <- names(X_layers)[-1]
+        layers_list
+      } else {
+        NULL
+      }
+      
+      # Load obsm matrices (observation embeddings/reduced dimensions)
+      obsm <- if (!isFALSE(obsm_layers)) {
+        ms_obsm <- tryCatch(expr = self$ms$obsm$names(), error = function(e) NULL)
+        if (!is.null(ms_obsm)) {
+          obsm_layers <- obsm_layers %||% ms_obsm
+          obsm_layers <- pad_names(obsm_layers)
+          assert_subset(x = obsm_layers, y = ms_obsm, type = "observation matrix")
+          
+          obsm_list <- lapply(
+            X = obsm_layers,
+            FUN = function(layer) {
+              mat <- private$.load_m_axis(layer = layer, m_axis = "obsm")
+              dimnames(mat) <- list(row.names(obs), NULL)
+              return(mat)
+            }
+          )
+          names(obsm_list) <- names(obsm_layers)
+          obsm_list
+        } else {
+          NULL
+        }
+      } else {
+        NULL
+      }
+      
+      # Load varm matrices (variable embeddings/feature loadings)
+      varm <- if (!isFALSE(varm_layers)) {
+        ms_varm <- tryCatch(expr = self$ms$varm$names(), error = function(e) NULL)
+        if (!is.null(ms_varm)) {
+          varm_layers <- varm_layers %||% ms_varm
+          varm_layers <- pad_names(varm_layers)
+          assert_subset(x = varm_layers, y = ms_varm, type = "variable matrix")
+          
+          varm_list <- lapply(
+            X = varm_layers,
+            FUN = function(layer) {
+              mat <- private$.load_m_axis(layer = layer, m_axis = "varm")
+              dimnames(mat) <- list(row.names(var), NULL)
+              return(mat)
+            }
+          )
+          names(varm_list) <- names(varm_layers)
+          varm_list
+        } else {
+          NULL
+        }
+      } else {
+        NULL
+      }
+      
+      # Load obsp matrices (observation pairwise relationships)
+      obsp <- if (!isFALSE(obsp_layers)) {
+        ms_obsp <- tryCatch(expr = self$ms$obsp$names(), error = function(e) NULL)
+        if (!is.null(ms_obsp)) {
+          obsp_layers <- obsp_layers %||% ms_obsp
+          obsp_layers <- pad_names(obsp_layers)
+          assert_subset(x = obsp_layers, y = ms_obsp, type = "observation pairwise matrix")
+          
+          obsp_list <- lapply(
+            X = obsp_layers,
+            FUN = function(layer) {
+              mat <- private$.load_p_axis(layer = layer, p_axis = "obsp", repr = "C")
+              dimnames(mat) <- list(row.names(obs), row.names(obs))
+              return(mat)
+            }
+          )
+          names(obsp_list) <- names(obsp_layers)
+          obsp_list
+        } else {
+          NULL
+        }
+      } else {
+        NULL
+      }
+      
+      # Load varp matrices (variable pairwise relationships)
+      varp <- if (!isFALSE(varp_layers)) {
+        ms_varp <- tryCatch(expr = self$ms$varp$names(), error = function(e) NULL)
+        if (!is.null(ms_varp)) {
+          varp_layers <- varp_layers %||% ms_varp
+          varp_layers <- pad_names(varp_layers)
+          assert_subset(x = varp_layers, y = ms_varp, type = "variable pairwise matrix")
+          
+          varp_list <- lapply(
+            X = varp_layers,
+            FUN = function(layer) {
+              mat <- private$.load_p_axis(layer = layer, p_axis = "varp", repr = "C")
+              dimnames(mat) <- list(row.names(var), row.names(var))
+              return(mat)
+            }
+          )
+          names(varp_list) <- names(varp_layers)
+          varp_list
+        } else {
+          NULL
+        }
+      } else {
+        NULL
+      }
+      
+      # Create the AnnData object
+      adata <- anndataR::AnnData(
+        X = X,
+        obs = obs,
+        var = var,
+        layers = layers,
+        obsm = obsm,
+        varm = varm,
+        obsp = obsp,
+        varp = varp,
+        ...
+      )
+      
+      return(adata)
     }
   ),
   active = list(
